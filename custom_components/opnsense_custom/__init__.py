@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -16,13 +15,20 @@ from .const import (
     CONF_PORT,
     CONF_SCAN_INTERVAL,
     CONF_VERIFY_SSL,
+    CONF_WAN_INTERFACE,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_VERIFY_SSL,
     DOMAIN,
     PLATFORMS,
+    WAN_AUTO,
 )
 from .coordinator import OPNsenseDataCoordinator
+from .dashboard import (
+    async_delete_dashboard,
+    async_register_dashboard,
+    async_unregister_dashboard,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,10 +49,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api_secret: str = entry.data[CONF_API_SECRET]
     verify_ssl: bool = entry.data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
 
-    # L'intervalle de polling est dans entry.options (modifiable via OptionsFlow)
+    # L'intervalle de polling et le choix WAN sont dans entry.options
+    # (modifiables via OptionsFlow sans réinstaller).
     scan_interval: int = entry.options.get(
         CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
     )
+    wan_interface: str = entry.options.get(CONF_WAN_INTERFACE, WAN_AUTO)
 
     session = async_get_clientsession(hass, verify_ssl=verify_ssl)
     client = OPNsenseApiClient(
@@ -63,6 +71,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client=client,
         scan_interval=scan_interval,
         entry=entry,
+        wan_interface=wan_interface,
     )
 
     # Premier refresh - si ça échoue, on remonte l'erreur et HA ne charge pas
@@ -77,6 +86,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Charge les plateformes (sensor, binary_sensor, button, update)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Pose le dashboard "OPNsense" dans la sidebar (après que les entités
+    # soient enregistrées, pour lire leurs entity_id réels). Best-effort.
+    await async_register_dashboard(hass, entry)
+
     return True
 
 
@@ -86,8 +99,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry, PLATFORMS
     )
     if unload_ok:
+        await async_unregister_dashboard(hass, entry)
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Nettoyage à la suppression de l'intégration : supprime le dashboard."""
+    await async_delete_dashboard(hass, entry)
 
 
 async def _async_options_updated(
